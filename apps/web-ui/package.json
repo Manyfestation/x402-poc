@@ -1,0 +1,14 @@
+{
+  "name": "@x402-kaspa/web-ui",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@x402-kaspa/kaspa-wasm": "0.1.0",
+    "@x402-kaspa/kaspa-core": "0.1.0",
+    "@x402-kaspa/protocol": "0.1.0",
+    "@x402-kaspa/test-kit": "0.1.0"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@x402-kaspa/client-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "demo": "node src/index.js"
+  },
+  "dependencies": {
+    "@x402-kaspa/kaspa-wasm": "0.1.0",
+    "@x402-kaspa/test-kit": "0.1.0",
+    "@x402-kaspa/x402-client": "0.1.0"
+  }
+}

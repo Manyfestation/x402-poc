@@ -1,0 +1,21 @@
+{
+  "name": "x402-kaspa-poc",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "test": "node --test tests/*.test.js",
+    "facilitator": "cargo run --manifest-path apps/facilitator/Cargo.toml",
+    "merchant": "npm run start --workspace @x402-kaspa/merchant-demo",
+    "client:demo": "npm run demo --workspace @x402-kaspa/client-cli",
+    "ui": "npm run start --workspace @x402-kaspa/web-ui",
+    "proof:e2e": "node scripts/e2e-proof.js"
+  },
+  "engines": {
+    "node": ">=25"
+  }
+}

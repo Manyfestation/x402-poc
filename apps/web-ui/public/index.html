@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>x402 Kaspa POC</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="card flow-shell">
+        <div class="topbar">
+          <div>
+            <p class="eyebrow">x402 Kaspa POC</p>
+            <h1>402 -> Pay -> Unlock</h1>
+          </div>
+          <div class="top-actions">
+            <span id="networkLabel" class="network-pill">-</span>
+            <button id="resetFlow" class="ghost">Reset</button>
+          </div>
+        </div>
+
+        <div class="journey-steps">
+          <article id="stepChallenge" class="journey-step" data-state="active">
+            <span class="step-index">1</span>
+            <div class="step-copy">
+              <strong>402</strong>
+              <span>merchant returns requirement</span>
+            </div>
+            <span class="step-state">Active</span>
+          </article>
+
+          <article id="stepPay" class="journey-step" data-state="pending">
+            <span class="step-index">2</span>
+            <div class="step-copy">
+              <strong>Pay</strong>
+              <span>client settles the request</span>
+            </div>
+            <span class="step-state">Pending</span>
+          </article>
+
+          <article id="stepUnlock" class="journey-step" data-state="pending">
+            <span class="step-index">3</span>
+            <div class="step-copy">
+              <strong>Unlock</strong>
+              <span>merchant accepts receipt</span>
+            </div>
+            <span class="step-state">Pending</span>
+          </article>
+        </div>
+
+        <p id="flowHint" class="message">
+          Loading the protected resource and waiting for the merchant challenge.
+        </p>
+      </section>
+
+      <section class="panel-grid">
+        <section class="card merchant-card">
+          <div class="panel-head">
+            <h2>Merchant</h2>
+            <span id="merchantState" class="pill locked">Locked</span>
+          </div>
+          <p id="merchantMessage" class="message">Loading paywall…</p>
+          <div class="meta">
+            <div>
+              <span>Price</span>
+              <strong id="amountDue">-</strong>
+            </div>
+            <div>
+              <span>Payment Id</span>
+              <strong id="paymentId">-</strong>
+            </div>
+          </div>
+          <div id="contentBox" class="content locked-content">
+            Payment required
+          </div>
+        </section>
+
+        <section class="card client-card">
+          <div class="panel-head">
+            <div>
+              <h2>Client</h2>
+              <p id="payerAddress" class="panel-subtitle">-</p>
+            </div>
+            <span id="clientState" class="pill idle">Idle</span>
+          </div>
+          <p id="clientMessage" class="message">Waiting for merchant challenge.</p>
+          <div class="actions">
+            <button id="payButton" disabled>Pay</button>
+            <a id="txLink" class="tx-link is-muted" href="#" target="_blank" rel="noreferrer">Awaiting TN12 tx</a>
+          </div>
+          <div class="meta compact">
+            <div>
+              <span>Quote</span>
+              <strong id="quoteId">-</strong>
+            </div>
+            <div>
+              <span>Tx</span>
+              <strong id="txId">-</strong>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <details class="inspect-card">
+        <summary>Debug trace</summary>
+        <div class="inspect-stack">
+          <pre id="terminalLog" class="terminal-log">[boot] Waiting for config…</pre>
+
+          <div class="payload-grid">
+            <section class="payload-panel">
+              <span>Config</span>
+              <pre id="configJson" class="payload-json">-</pre>
+            </section>
+            <section class="payload-panel">
+              <span>Merchant challenge</span>
+              <pre id="challengeJson" class="payload-json">-</pre>
+            </section>
+            <section class="payload-panel">
+              <span>Facilitator quote</span>
+              <pre id="quoteJson" class="payload-json">-</pre>
+            </section>
+            <section class="payload-panel">
+              <span>Wallet submit</span>
+              <pre id="paymentJson" class="payload-json">-</pre>
+            </section>
+            <section class="payload-panel">
+              <span>Receipt</span>
+              <pre id="receiptJson" class="payload-json">-</pre>
+            </section>
+            <section class="payload-panel">
+              <span>Merchant unlock</span>
+              <pre id="finalJson" class="payload-json">-</pre>
+            </section>
+          </div>
+        </div>
+      </details>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

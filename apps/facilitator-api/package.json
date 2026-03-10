@@ -1,0 +1,15 @@
+{
+  "name": "@x402-kaspa/facilitator-api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/service.js",
+  "scripts": {
+    "start": "cargo run --manifest-path ../facilitator/Cargo.toml"
+  },
+  "dependencies": {
+    "@x402-kaspa/kaspa-wasm": "0.1.0",
+    "@x402-kaspa/kaspa-core": "0.1.0",
+    "@x402-kaspa/protocol": "0.1.0",
+    "@x402-kaspa/test-kit": "0.1.0"
+  }
+}

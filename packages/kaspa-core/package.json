@@ -1,0 +1,9 @@
+{
+  "name": "@x402-kaspa/kaspa-core",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.js",
+  "dependencies": {
+    "@x402-kaspa/protocol": "0.1.0"
+  }
+}

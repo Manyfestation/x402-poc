@@ -1,21 +1,13 @@
 import {
   REAL_TX_FORMAT,
-  SCHEME_NAME
+  SCHEME_NAME,
+  getKaspaMaxFeeSompi,
+  samePaymentRequirements
 } from "@x402-kaspa/protocol";
-
-const REQUIREMENT_FIELDS = [
-  "paymentId",
-  "resource",
-  "merchantAddress",
-  "amountSompi",
-  "maxFeeSompi",
-  "facilitatorUrl",
-  "network"
-];
 
 export function verifyTransactionQuoteForPayer({
   quote,
-  requirement,
+  paymentRequirements,
   payerAddress,
   payerAddresses
 }) {
@@ -23,7 +15,7 @@ export function verifyTransactionQuoteForPayer({
     throw new Error("quote must be an object");
   }
 
-  if (!requirement || typeof requirement !== "object") {
+  if (!paymentRequirements || typeof paymentRequirements !== "object") {
     throw new Error("payment requirement must be an object");
   }
 
@@ -50,14 +42,12 @@ export function verifyTransactionQuoteForPayer({
     throw new Error("quote is missing an unsigned transaction payload");
   }
 
-  if (!quote.requirement || typeof quote.requirement !== "object") {
-    throw new Error("quote is missing the payment requirement");
+  if (!quote.paymentRequirements || typeof quote.paymentRequirements !== "object") {
+    throw new Error("quote is missing the payment requirements");
   }
 
-  for (const field of REQUIREMENT_FIELDS) {
-    if (quote.requirement[field] !== requirement[field]) {
-      throw new Error(`quote requirement mismatch for ${field}`);
-    }
+  if (!samePaymentRequirements(quote.paymentRequirements, paymentRequirements)) {
+    throw new Error("quote payment requirements mismatch");
   }
 
   if (!quote.payerContext || typeof quote.payerContext !== "object") {
@@ -77,11 +67,11 @@ export function verifyTransactionQuoteForPayer({
     throw new Error("signing summary payer address mismatch");
   }
 
-  if (summary.merchantAddress !== requirement.merchantAddress) {
+  if (summary.merchantAddress !== paymentRequirements.payTo) {
     throw new Error("merchant output address mismatch");
   }
 
-  if (summary.transferAmountSompi !== requirement.amountSompi) {
+  if (String(summary.transferAmountSompi) !== paymentRequirements.amount) {
     throw new Error("merchant output amount mismatch");
   }
 
@@ -89,7 +79,7 @@ export function verifyTransactionQuoteForPayer({
     throw new Error("signing summary is missing payer inputs");
   }
 
-  if (typeof summary.totalInputSompi !== "number" || summary.totalInputSompi < requirement.amountSompi) {
+  if (typeof summary.totalInputSompi !== "number" || summary.totalInputSompi < Number(paymentRequirements.amount)) {
     throw new Error("signing summary total input is invalid");
   }
 
@@ -97,7 +87,7 @@ export function verifyTransactionQuoteForPayer({
     throw new Error("signing summary fee is invalid");
   }
 
-  if (summary.feeSompi > requirement.maxFeeSompi) {
+  if (summary.feeSompi > getKaspaMaxFeeSompi(paymentRequirements)) {
     throw new Error("quoted fee exceeds the payment requirement max fee");
   }
 

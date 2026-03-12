@@ -1,13 +1,22 @@
 import { deriveAddressCandidates, inspectQuoteTransaction, signQuoteTransaction } from "./kaspa-wallet.js";
 
+const X402_VERSION = 2;
+const PAYMENT_REQUIRED_HEADER = "payment-required";
+const PAYMENT_SIGNATURE_HEADER = "payment-signature";
+const PAYMENT_RESPONSE_HEADER = "payment-response";
+const PAYMENT_IDENTIFIER_EXTENSION = "payment-identifier";
+const TX_FORMAT = "kaspa-unsigned-transaction-v1";
+
 const state = {
   config: null,
   wallet: null,
   walletCandidates: null,
-  requirement: null,
+  paymentRequired: null,
+  paymentRequirements: null,
+  paymentId: null,
   quote: null,
-  receipt: null,
-  payment: null,
+  paymentPayload: null,
+  settlementResponse: null,
   finalResult: null
 };
 
@@ -72,11 +81,11 @@ function setJourneyStage(hint, steps) {
 }
 
 function getErrorSteps() {
-  if (!state.requirement) {
+  if (!state.paymentRequired) {
     return { challenge: "error", pay: "pending", unlock: "pending" };
   }
 
-  if (!state.payment) {
+  if (!state.paymentPayload) {
     return { challenge: "done", pay: "error", unlock: "pending" };
   }
 
@@ -84,7 +93,7 @@ function getErrorSteps() {
 }
 
 function syncNetworkLabel() {
-  els.networkLabel.textContent = state.requirement?.network ?? state.config?.networkId ?? "-";
+  els.networkLabel.textContent = state.paymentRequirements?.network ?? state.config?.networkId ?? "-";
 }
 
 function setTxLink(url, label, enabled = false) {
@@ -137,11 +146,17 @@ function getErrorDetails(error) {
   };
 }
 
+function createPaymentId() {
+  return `payment_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
 function resetViews() {
-  state.requirement = null;
+  state.paymentRequired = null;
+  state.paymentRequirements = null;
+  state.paymentId = null;
   state.quote = null;
-  state.receipt = null;
-  state.payment = null;
+  state.paymentPayload = null;
+  state.settlementResponse = null;
   state.finalResult = null;
   els.quoteId.textContent = "-";
   els.txId.textContent = "-";
@@ -169,8 +184,19 @@ function resetViews() {
   setPayload(els.finalJson, null);
 }
 
-function base64UrlEncode(value) {
-  return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+function encodeJsonHeader(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
+}
+
+function decodeJsonHeader(value) {
+  const binary = atob(value);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
 }
 
 async function readJson(response) {
@@ -194,30 +220,34 @@ async function fetchJson(url, options = {}) {
   return payload;
 }
 
+function paymentRequirementsMatch(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
+  return left.scheme === right.scheme &&
+    left.network === right.network &&
+    left.amount === right.amount &&
+    left.asset === right.asset &&
+    left.payTo === right.payTo &&
+    left.maxTimeoutSeconds === right.maxTimeoutSeconds &&
+    left.extra?.maxFeeSompi === right.extra?.maxFeeSompi &&
+    left.extra?.txFormat === right.extra?.txFormat;
+}
+
 function verifyQuote() {
   const quote = state.quote;
-  const requirement = state.requirement;
+  const paymentRequirements = state.paymentRequirements;
   const summary = quote.signingSummary;
   const allowedPayerAddresses = Array.isArray(state.walletCandidates) && state.walletCandidates.length > 0
     ? state.walletCandidates
     : [state.config.payerAddress];
 
-  const comparedFields = [
-    "paymentId",
-    "resource",
-    "merchantAddress",
-    "amountSompi",
-    "maxFeeSompi",
-    "facilitatorUrl",
-    "network"
-  ];
-  for (const field of comparedFields) {
-    if (quote.requirement[field] !== requirement[field]) {
-      throw new Error(`quote requirement mismatch for ${field}`);
-    }
+  if (!paymentRequirementsMatch(quote.paymentRequirements, paymentRequirements)) {
+    throw new Error("quote payment requirements mismatch");
   }
 
-  if (quote.txFormat !== "kaspa-unsigned-transaction-v1") {
+  if (quote.txFormat !== TX_FORMAT) {
     throw new Error(`unexpected tx format: ${quote.txFormat}`);
   }
 
@@ -225,7 +255,7 @@ function verifyQuote() {
     throw new Error("quote is missing an unsigned transaction payload");
   }
 
-  if (summary.merchantAddress !== requirement.merchantAddress) {
+  if (summary.merchantAddress !== paymentRequirements.payTo) {
     throw new Error("merchant output address mismatch");
   }
 
@@ -233,11 +263,11 @@ function verifyQuote() {
     throw new Error("quote payer address mismatch");
   }
 
-  if (summary.transferAmountSompi !== requirement.amountSompi) {
+  if (String(summary.transferAmountSompi) !== paymentRequirements.amount) {
     throw new Error("merchant output amount mismatch");
   }
 
-  if (summary.feeSompi > requirement.maxFeeSompi) {
+  if (summary.feeSompi > paymentRequirements.extra.maxFeeSompi) {
     throw new Error("quoted fee exceeds requirement max fee");
   }
 
@@ -258,6 +288,35 @@ function verifyQuote() {
   }
 }
 
+function buildPaymentPayload(signedTransaction) {
+  return {
+    x402Version: X402_VERSION,
+    resource: state.paymentRequired.resource,
+    accepted: state.paymentRequirements,
+    payload: {
+      quoteId: state.quote.quoteId,
+      transaction: signedTransaction,
+      txFormat: TX_FORMAT
+    },
+    extensions: {
+      [PAYMENT_IDENTIFIER_EXTENSION]: {
+        info: {
+          paymentId: state.paymentId
+        },
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            paymentId: {
+              type: "string"
+            }
+          }
+        }
+      }
+    }
+  };
+}
+
 async function loadPaywall() {
   resetViews();
   if (state.config) {
@@ -267,26 +326,32 @@ async function loadPaywall() {
   const response = await fetch("/api/merchant/premium", {
     signal: AbortSignal.timeout(state.config?.httpTimeoutMs ?? 10_000)
   });
-  const payload = await readJson(response);
 
   if (response.status !== 402) {
     throw new Error(`expected 402 but received ${response.status}`);
   }
 
-  state.requirement = payload.requirement;
-  setPayload(els.challengeJson, payload);
+  const paymentRequiredHeader = response.headers.get(PAYMENT_REQUIRED_HEADER);
+  if (!paymentRequiredHeader) {
+    throw new Error("merchant returned 402 without PAYMENT-REQUIRED");
+  }
+
+  state.paymentRequired = decodeJsonHeader(paymentRequiredHeader);
+  state.paymentRequirements = state.paymentRequired.accepts[0];
+  state.paymentId = createPaymentId();
+  setPayload(els.challengeJson, state.paymentRequired);
   syncNetworkLabel();
-  els.amountDue.textContent = `${payload.requirement.amountSompi} sompi`;
-  els.paymentId.textContent = payload.requirement.paymentId;
-  els.merchantMessage.textContent = "402 returned. Waiting for payment.";
+  els.amountDue.textContent = `${state.paymentRequirements.amount} sompi`;
+  els.paymentId.textContent = state.paymentId;
+  els.merchantMessage.textContent = "402 returned. Waiting for PAYMENT-SIGNATURE.";
   els.clientMessage.textContent = "Challenge received. Ready to pay.";
   setMerchantState("Locked", "locked");
   setClientState("Ready", "ready");
   setJourneyStage(
-    "Merchant requested payment. Press Pay to settle the request.",
+    "Merchant requested payment. Press Pay to prepare, inspect, and sign the Kaspa transaction.",
     { challenge: "done", pay: "active", unlock: "pending" }
   );
-  logTerminal("merchant", "Received 402 payment challenge", payload);
+  logTerminal("merchant", "Received PAYMENT-REQUIRED challenge", state.paymentRequired);
   els.payButton.disabled = false;
   els.payButton.textContent = "Pay";
 }
@@ -298,19 +363,19 @@ async function runPayment() {
     setClientState("Paying", "active");
     els.clientMessage.textContent = "Preparing payment.";
     setJourneyStage(
-      "Preparing the payment, verifying it, and broadcasting to TN12.",
+      "Preparing the payment, verifying the PSKB locally, and retrying with PAYMENT-SIGNATURE.",
       { challenge: "done", pay: "active", unlock: "pending" }
     );
 
-    logTerminal("facilitator", "POST /api/facilitator/quotes", {
-      requirement: state.requirement,
+    logTerminal("facilitator", "POST /api/facilitator/prepare", {
+      paymentRequirements: state.paymentRequirements,
       payerAddresses: state.walletCandidates
     });
-    state.quote = await fetchJson("/api/facilitator/quotes", {
+    state.quote = await fetchJson("/api/facilitator/prepare", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        requirement: state.requirement,
+        paymentRequirements: state.paymentRequirements,
         payerAddress: state.config.payerAddress,
         payerAddresses: state.walletCandidates
       })
@@ -327,14 +392,14 @@ async function runPayment() {
     const pskbInspection = await inspectQuoteTransaction({
       unsignedTransaction: state.quote.unsignedTransaction,
       networkId: state.config.networkId,
-      requirement: state.requirement,
+      requirement: state.paymentRequirements,
       signingSummary: state.quote.signingSummary
     });
     els.payerAddress.textContent = shortId(state.quote.payerContext?.payerAddress ?? state.config.payerAddress);
-    logTerminal("client", "Verified quote against merchant challenge and payer wallet", {
-      paymentId: state.requirement.paymentId,
-      merchantAddress: state.requirement.merchantAddress,
-      amountSompi: state.requirement.amountSompi,
+    logTerminal("client", "Verified quote against the x402 requirements and payer wallet", {
+      paymentId: state.paymentId,
+      merchantAddress: state.paymentRequirements.payTo,
+      amountSompi: state.paymentRequirements.amount,
       payerAddress: state.quote.payerContext?.payerAddress ?? state.config.payerAddress,
       pskbOutputs: pskbInspection.outputs
     });
@@ -349,58 +414,47 @@ async function runPayment() {
       mnemonic: state.wallet.mnemonic,
       networkId: state.config.networkId
     });
-    setPayload(els.paymentJson, {
-      signedLocally: true,
-      signedTransactionLength: signed.signedTransaction?.length
-    });
-    logTerminal("wallet", "Signed PSKB locally; submitting it to the facilitator", {
-      quoteId: state.quote.quoteId
+
+    state.paymentPayload = buildPaymentPayload(signed.signedTransaction);
+    setPayload(els.paymentJson, state.paymentPayload);
+    logTerminal("wallet", "Signed PSKB locally; retrying merchant request with PAYMENT-SIGNATURE", {
+      quoteId: state.quote.quoteId,
+      paymentId: state.paymentId
     });
 
-    state.receipt = await fetchJson("/api/facilitator/submit", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        quoteId: state.quote.quoteId,
-        signedTransaction: signed.signedTransaction
-      })
-    });
-    state.payment = {
-      txid: state.receipt.txid,
-      payerAddress: state.config.payerAddress
-    };
-    setPayload(els.paymentJson, {
-      ...state.payment,
-      explorerUrl: buildExplorerUrl(state.payment.txid)
-    });
-    els.txId.textContent = shortId(state.payment.txid);
-    setTxLink(buildExplorerUrl(state.payment.txid), buildExplorerUrl(state.payment.txid), true);
-    setJourneyStage(
-      "Payment sent. Waiting for receipt validation and merchant unlock.",
-      { challenge: "done", pay: "done", unlock: "active" }
-    );
-    logTerminal("facilitator", "Facilitator broadcast and verified the TN12 transaction", {
-      txid: state.payment.txid,
-      explorerUrl: buildExplorerUrl(state.payment.txid)
-    });
-    setPayload(els.receiptJson, state.receipt);
-    logTerminal("facilitator", "Received payment receipt", state.receipt);
-
-    const receiptHeader = base64UrlEncode(JSON.stringify(state.receipt));
-    logTerminal("merchant", "GET /api/merchant/premium with x-payment-receipt", {
-      receiptHeader,
-      receipt: state.receipt
+    const paymentSignatureHeader = encodeJsonHeader(state.paymentPayload);
+    logTerminal("merchant", "GET /api/merchant/premium with PAYMENT-SIGNATURE", {
+      paymentSignatureHeader,
+      paymentPayload: state.paymentPayload
     });
     const paidResponse = await fetch("/api/merchant/premium", {
       signal: AbortSignal.timeout(state.config?.httpTimeoutMs ?? 10_000),
       headers: {
-        "x-payment-receipt": receiptHeader
+        [PAYMENT_SIGNATURE_HEADER]: paymentSignatureHeader
       }
     });
     const paidBody = await paidResponse.text();
-    if (!paidResponse.ok) {
-      throw new Error(`paid request failed with ${paidResponse.status}`);
+    const paymentResponseHeader = paidResponse.headers.get(PAYMENT_RESPONSE_HEADER);
+    state.settlementResponse = paymentResponseHeader ? decodeJsonHeader(paymentResponseHeader) : null;
+    setPayload(els.receiptJson, state.settlementResponse);
+
+    if (state.settlementResponse?.transaction) {
+      els.txId.textContent = shortId(state.settlementResponse.transaction);
+      setTxLink(
+        buildExplorerUrl(state.settlementResponse.transaction),
+        buildExplorerUrl(state.settlementResponse.transaction),
+        true
+      );
     }
+
+    if (!paidResponse.ok) {
+      throw new Error(
+        state.settlementResponse?.errorReason
+          ? `payment failed: ${state.settlementResponse.errorReason}`
+          : `paid request failed with ${paidResponse.status}`
+      );
+    }
+
     state.finalResult = {
       status: paidResponse.status,
       body: paidBody
@@ -409,16 +463,19 @@ async function runPayment() {
 
     setMerchantState("Unlocked", "unlocked");
     setClientState("Done", "done");
-    els.merchantMessage.textContent = "Receipt accepted.";
+    els.merchantMessage.textContent = "PAYMENT-RESPONSE accepted.";
     els.clientMessage.textContent = "Payment complete.";
     els.contentBox.textContent = paidBody;
     els.contentBox.className = "content unlocked-content";
     els.payButton.textContent = "Paid";
     setJourneyStage(
-      "Payment complete. The merchant accepted the receipt and unlocked the content.",
+      "Payment complete. The merchant verified and settled the PAYMENT-SIGNATURE payload.",
       { challenge: "done", pay: "done", unlock: "done" }
     );
-    logTerminal("merchant", "Merchant unlocked premium content", state.finalResult);
+    logTerminal("merchant", "Merchant unlocked premium content", {
+      finalResult: state.finalResult,
+      settlementResponse: state.settlementResponse
+    });
   } catch (error) {
     const details = getErrorDetails(error);
     setClientState("Error", "error");
@@ -426,12 +483,16 @@ async function runPayment() {
     els.payButton.textContent = "Retry Pay";
     setJourneyStage(`Flow blocked: ${details.message}`, getErrorSteps());
     setPayload(els.finalJson, {
-      step: state.payment ? "merchant-unlock" : "payment",
+      step: state.paymentPayload ? "merchant-settlement" : "payment",
+      settlementResponse: state.settlementResponse,
       ...details
     });
-    logTerminal("error", details.message, details);
+    logTerminal("error", details.message, {
+      ...details,
+      settlementResponse: state.settlementResponse
+    });
   } finally {
-    els.payButton.disabled = Boolean(state.receipt);
+    els.payButton.disabled = Boolean(state.settlementResponse?.success);
   }
 }
 

@@ -230,13 +230,13 @@ function inspectUnsignedPskbDisplay(displayFormat, { requirement, signingSummary
     throw new Error("PSKB did not expose any outputs");
   }
 
-  const merchantOutputs = outputs.filter((output) => output.address === requirement.merchantAddress);
+  const merchantOutputs = outputs.filter((output) => output.address === requirement.payTo);
   if (merchantOutputs.length === 0) {
     throw new Error("PSKB is missing the merchant output");
   }
 
   const merchantAmountSompi = merchantOutputs.reduce((total, output) => total + output.amountSompi, 0);
-  if (merchantAmountSompi !== requirement.amountSompi) {
+  if (String(merchantAmountSompi) !== requirement.amount) {
     throw new Error("PSKB merchant output amount mismatch");
   }
 
@@ -244,7 +244,7 @@ function inspectUnsignedPskbDisplay(displayFormat, { requirement, signingSummary
     throw new Error("PSKB merchant output does not match the signing summary");
   }
 
-  const changeOutputs = outputs.filter((output) => output.address !== requirement.merchantAddress);
+  const changeOutputs = outputs.filter((output) => output.address !== requirement.payTo);
   if (changeOutputs.length > 1) {
     throw new Error("PSKB produced an unsupported change shape for this demo");
   }

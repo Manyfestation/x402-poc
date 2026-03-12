@@ -6,11 +6,20 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULT_ASSET,
   DEFAULT_NETWORK,
   REAL_TX_FORMAT,
   SCHEME_NAME,
-  assertPaymentRequirement,
-  createId
+  X402_VERSION,
+  assertPaymentRequirements,
+  assertVerifyRequest,
+  createId,
+  createSettlementResponse,
+  createSupportedResponse,
+  getKaspaMaxFeeSompi,
+  getKaspaTxFormat,
+  getPaymentIdFromExtensions,
+  samePaymentRequirements
 } from "@x402-kaspa/protocol";
 import {
   FACILITATOR_URL
@@ -19,12 +28,16 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_STATE_FILE = path.resolve(__dirname, "../.data/facilitator-state.json");
 
-async function unsupportedQuoteBuilder() {
-  throw new Error("the active TN12 facilitator runtime is the Rust service behind `npm run facilitator`");
+function unsupportedMessage(kind) {
+  return `the active TN12 facilitator runtime is the Rust service behind \`npm run facilitator\`; ${kind} is unavailable in the JS test double`;
 }
 
-async function unsupportedPaymentVerifier() {
-  throw new Error("the active TN12 facilitator runtime is the Rust service behind `npm run facilitator`");
+async function unsupportedQuoteBuilder() {
+  throw new Error(unsupportedMessage("quote preparation"));
+}
+
+async function unsupportedPaymentSettler() {
+  throw new Error(unsupportedMessage("payment settlement"));
 }
 
 function loadPayments(stateFile) {
@@ -32,7 +45,7 @@ function loadPayments(stateFile) {
     const raw = readFileSync(stateFile, "utf8");
     const parsed = JSON.parse(raw);
     const payments = Array.isArray(parsed.payments) ? parsed.payments : [];
-    return new Map(payments.map((payment) => [payment.paymentId ?? payment.receipt?.paymentId, payment]));
+    return new Map(payments.map((payment) => [payment.paymentId, payment]));
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
       return new Map();
@@ -56,134 +69,242 @@ function persistPayments(stateFile, payments) {
   );
 }
 
+function validateSupportedPaymentRequirements({ network, asset }, paymentRequirements) {
+  assertPaymentRequirements(paymentRequirements);
+
+  if (paymentRequirements.network !== network) {
+    throw new Error("payment requirements use an unexpected network");
+  }
+
+  if (paymentRequirements.asset !== asset) {
+    throw new Error("payment requirements use an unexpected asset");
+  }
+}
+
+function validatePreparedQuote(paymentRequirements, prepared) {
+  if (!prepared || typeof prepared !== "object") {
+    throw new Error("quote builder did not return a quote object");
+  }
+
+  if (prepared.signingSummary?.merchantAddress !== paymentRequirements.payTo) {
+    throw new Error("quote merchant output address mismatch");
+  }
+
+  if (String(prepared.signingSummary?.transferAmountSompi) !== paymentRequirements.amount) {
+    throw new Error("quote merchant output amount mismatch");
+  }
+
+  if (prepared.signingSummary?.feeSompi > getKaspaMaxFeeSompi(paymentRequirements)) {
+    throw new Error("quote fee exceeds the payment requirement max fee");
+  }
+}
+
 export class FacilitatorService {
   constructor({
     facilitatorUrl = FACILITATOR_URL,
     network = DEFAULT_NETWORK,
+    asset = DEFAULT_ASSET,
     quoteBuilder = unsupportedQuoteBuilder,
-    paymentVerifier = unsupportedPaymentVerifier,
+    paymentPayloadVerifier,
+    paymentSettler = unsupportedPaymentSettler,
     stateFile = process.env.X402_FACILITATOR_STATE_FILE ?? DEFAULT_STATE_FILE
   } = {}) {
     if (typeof quoteBuilder !== "function") {
       throw new Error("quoteBuilder is required");
     }
 
-    if (typeof paymentVerifier !== "function") {
-      throw new Error("paymentVerifier is required");
+    if (paymentPayloadVerifier != null && typeof paymentPayloadVerifier !== "function") {
+      throw new Error("paymentPayloadVerifier must be a function");
+    }
+
+    if (typeof paymentSettler !== "function") {
+      throw new Error("paymentSettler is required");
     }
 
     this.facilitatorUrl = facilitatorUrl;
     this.network = network;
+    this.asset = asset;
     this.quoteBuilder = quoteBuilder;
-    this.paymentVerifier = paymentVerifier;
+    this.paymentPayloadVerifier = paymentPayloadVerifier;
+    this.paymentSettler = paymentSettler;
     this.stateFile = stateFile;
     this.quotes = new Map();
     this.payments = loadPayments(stateFile);
   }
 
-  async createQuote({ requirement, payerAddress }) {
-    assertPaymentRequirement(requirement);
+  async createPreparation({ paymentRequirements, payerAddress, payerAddresses }) {
+    validateSupportedPaymentRequirements(this, paymentRequirements);
 
-    if (requirement.facilitatorUrl !== this.facilitatorUrl) {
-      throw new Error("payment requirement points to a different facilitator");
+    const payerAddressList = Array.isArray(payerAddresses)
+      ? payerAddresses.filter((value) => typeof value === "string" && value)
+      : [];
+    if (payerAddress && typeof payerAddress === "string" && !payerAddressList.includes(payerAddress)) {
+      payerAddressList.unshift(payerAddress);
     }
-
-    if (requirement.network !== this.network) {
-      throw new Error("payment requirement uses an unexpected network");
-    }
-
-    if (Date.now() >= Date.parse(requirement.expiresAt)) {
-      throw new Error("payment requirement has expired");
-    }
-
-    if (!payerAddress || typeof payerAddress !== "string") {
-      throw new Error("payerAddress is required");
+    if (payerAddressList.length === 0) {
+      throw new Error("payerAddress or payerAddresses is required");
     }
 
     const prepared = await this.quoteBuilder({
-      requirement,
-      payerAddress
+      paymentRequirements,
+      payerAddress,
+      payerAddresses: payerAddressList
     });
 
-    if (prepared.signingSummary.merchantAddress !== requirement.merchantAddress) {
-      throw new Error("quote merchant output address mismatch");
-    }
-
-    if (prepared.signingSummary.transferAmountSompi !== requirement.amountSompi) {
-      throw new Error("quote merchant output amount mismatch");
-    }
-
-    if (prepared.signingSummary.feeSompi > requirement.maxFeeSompi) {
-      throw new Error("quote fee exceeds the payment requirement max fee");
-    }
+    validatePreparedQuote(paymentRequirements, prepared);
 
     const quote = {
+      x402Version: X402_VERSION,
       scheme: SCHEME_NAME,
-      txFormat: REAL_TX_FORMAT,
+      txFormat: getKaspaTxFormat(paymentRequirements),
       quoteId: createId("quote"),
-      requirement,
+      paymentRequirements,
       unsignedTransaction: prepared.unsignedTransaction,
       signingSummary: prepared.signingSummary,
       payerContext: {
         payerAddress: prepared.payerAddress
       },
       createdAt: new Date().toISOString(),
-      expiresAt: new Date(Math.min(Date.parse(requirement.expiresAt), Date.now() + 5 * 60_000)).toISOString()
+      expiresAt: new Date(Date.now() + paymentRequirements.maxTimeoutSeconds * 1000).toISOString()
     };
 
     this.quotes.set(quote.quoteId, quote);
     return quote;
   }
 
-  async submitQuote({ quoteId, txid }) {
+  async verifyPayment(request) {
+    assertVerifyRequest(request);
+    validateSupportedPaymentRequirements(this, request.paymentRequirements);
+
+    if (!samePaymentRequirements(request.paymentPayload.accepted, request.paymentRequirements)) {
+      return {
+        isValid: false,
+        invalidReason: "accepted_payment_requirements_mismatch"
+      };
+    }
+
+    const quoteId = request.paymentPayload.payload?.quoteId;
+    if (typeof quoteId !== "string" || !quoteId) {
+      return {
+        isValid: false,
+        invalidReason: "missing_quote_id"
+      };
+    }
+
+    const transaction = request.paymentPayload.payload?.transaction;
+    if (typeof transaction !== "string" || !transaction) {
+      return {
+        isValid: false,
+        invalidReason: "missing_transaction"
+      };
+    }
+
+    const txFormat = request.paymentPayload.payload?.txFormat ?? getKaspaTxFormat(request.paymentRequirements);
+    if (txFormat !== REAL_TX_FORMAT) {
+      return {
+        isValid: false,
+        invalidReason: "unsupported_tx_format"
+      };
+    }
+
     const quote = this.quotes.get(quoteId);
     if (!quote) {
-      throw new Error("unknown quote id");
+      return {
+        isValid: false,
+        invalidReason: "unknown_quote_id"
+      };
     }
 
     if (Date.now() >= Date.parse(quote.expiresAt)) {
-      throw new Error("quote has expired");
+      return {
+        isValid: false,
+        invalidReason: "quote_expired"
+      };
     }
 
-    if (!txid || typeof txid !== "string") {
-      throw new Error("missing txid");
+    if (!samePaymentRequirements(quote.paymentRequirements, request.paymentRequirements)) {
+      return {
+        isValid: false,
+        invalidReason: "quote_payment_requirements_mismatch"
+      };
     }
 
-    const verification = await this.paymentVerifier({
-      txid,
-      merchantAddress: quote.requirement.merchantAddress,
-      amountSompi: quote.requirement.amountSompi,
-      network: quote.requirement.network
+    if (!this.paymentPayloadVerifier) {
+      return {
+        isValid: true,
+        payer: quote.payerContext.payerAddress
+      };
+    }
+
+    const verification = await this.paymentPayloadVerifier({
+      paymentPayload: request.paymentPayload,
+      paymentRequirements: request.paymentRequirements,
+      quote
     });
 
-    if (!verification.accepted) {
-      throw new Error("facilitator could not verify the merchant output on TN12");
+    if (!verification || typeof verification !== "object") {
+      throw new Error("paymentPayloadVerifier must return an object");
     }
 
-    const receipt = {
-      scheme: SCHEME_NAME,
-      paymentId: quote.requirement.paymentId,
-      quoteId: quote.quoteId,
-      txid,
-      payerAddress: quote.payerContext.payerAddress,
-      merchantAddress: quote.requirement.merchantAddress,
-      amountSompi: quote.requirement.amountSompi,
-      feeSompi: quote.signingSummary.feeSompi,
-      status: "accepted",
-      acceptedAt: new Date().toISOString()
+    return {
+      isValid: verification.isValid !== false,
+      payer: verification.payer ?? quote.payerContext.payerAddress,
+      ...(verification.isValid === false && verification.invalidReason
+        ? { invalidReason: verification.invalidReason }
+        : {})
     };
+  }
 
-    const payment = {
-      status: "accepted",
-      paymentId: receipt.paymentId,
-      requirement: quote.requirement,
-      receipt
-    };
+  async settlePayment(request) {
+    const verification = await this.verifyPayment(request);
+    if (!verification.isValid) {
+      return createSettlementResponse({
+        success: false,
+        transaction: "",
+        network: this.network,
+        payer: verification.payer,
+        errorReason: verification.invalidReason ?? "invalid_payment"
+      });
+    }
 
-    this.payments.set(receipt.paymentId, payment);
-    persistPayments(this.stateFile, this.payments);
+    const quote = this.quotes.get(request.paymentPayload.payload.quoteId);
+    const paymentId = getPaymentIdFromExtensions(request.paymentPayload.extensions) ?? createId("payment");
+    const existing = this.payments.get(paymentId);
+    if (existing) {
+      return existing.settlementResponse;
+    }
 
-    return receipt;
+    const settlement = await this.paymentSettler({
+      paymentPayload: request.paymentPayload,
+      paymentRequirements: request.paymentRequirements,
+      quote,
+      paymentId
+    });
+
+    const settlementResponse = createSettlementResponse({
+      success: settlement.success !== false,
+      transaction: settlement.transaction ?? "",
+      network: settlement.network ?? this.network,
+      payer: settlement.payer ?? verification.payer,
+      errorReason: settlement.success === false ? settlement.errorReason ?? "settlement_failed" : undefined,
+      extensions: request.paymentPayload.extensions
+    });
+
+    if (settlementResponse.success) {
+      const payment = {
+        status: "accepted",
+        paymentId,
+        payer: settlementResponse.payer ?? null,
+        paymentPayload: request.paymentPayload,
+        paymentRequirements: request.paymentRequirements,
+        settlementResponse,
+        acceptedAt: new Date().toISOString()
+      };
+      this.payments.set(paymentId, payment);
+      persistPayments(this.stateFile, this.payments);
+    }
+
+    return settlementResponse;
   }
 
   getPayment(paymentId) {
@@ -193,11 +314,20 @@ export class FacilitatorService {
     };
   }
 
+  getSupported() {
+    return createSupportedResponse({
+      network: this.network,
+      asset: this.asset
+    });
+  }
+
   getHealth() {
     return {
       ok: true,
+      x402Version: X402_VERSION,
       scheme: SCHEME_NAME,
       network: this.network,
+      asset: this.asset,
       facilitatorUrl: this.facilitatorUrl
     };
   }

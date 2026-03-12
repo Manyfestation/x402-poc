@@ -10,7 +10,12 @@ import {
   getHttpTimeoutMs,
   toKaspaNetworkId
 } from "@x402-kaspa/kaspa-wasm";
-import { JSON_CONTENT_TYPE } from "@x402-kaspa/protocol";
+import {
+  JSON_CONTENT_TYPE,
+  PAYMENT_REQUIRED_HEADER,
+  PAYMENT_RESPONSE_HEADER,
+  PAYMENT_SIGNATURE_HEADER
+} from "@x402-kaspa/protocol";
 import {
   FACILITATOR_URL,
   MERCHANT_URL
@@ -28,12 +33,14 @@ const mimeTypes = {
   ".css": "text/css; charset=utf-8"
 };
 
-function send(response, statusCode, body, contentType) {
+function send(response, statusCode, body, contentType, extraHeaders = {}) {
   response.writeHead(statusCode, {
     "content-type": contentType,
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type"
+    "access-control-allow-headers": "content-type,payment-signature,payment-required,payment-response",
+    "access-control-expose-headers": "payment-signature,payment-required,payment-response",
+    ...extraHeaders
   });
   response.end(body);
 }
@@ -116,47 +123,34 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/api/merchant/premium") {
-      const receiptHeader = request.headers["x-payment-receipt"];
+      const paymentSignatureHeader = request.headers[PAYMENT_SIGNATURE_HEADER];
       const merchantResponse = await fetch(`${MERCHANT_URL}/premium`, {
         signal: AbortSignal.timeout(httpTimeoutMs),
-        headers: receiptHeader ? { "x-payment-receipt": receiptHeader } : {}
+        headers: paymentSignatureHeader ? { [PAYMENT_SIGNATURE_HEADER]: paymentSignatureHeader } : {}
       });
       const text = await merchantResponse.text();
       const contentType = merchantResponse.headers.get("content-type") ?? "text/plain; charset=utf-8";
-      return send(response, merchantResponse.status, text, contentType);
+      const forwardedHeaders = {};
+      const paymentRequiredHeader = merchantResponse.headers.get(PAYMENT_REQUIRED_HEADER);
+      if (paymentRequiredHeader) {
+        forwardedHeaders[PAYMENT_REQUIRED_HEADER] = paymentRequiredHeader;
+      }
+      const paymentResponseHeader = merchantResponse.headers.get(PAYMENT_RESPONSE_HEADER);
+      if (paymentResponseHeader) {
+        forwardedHeaders[PAYMENT_RESPONSE_HEADER] = paymentResponseHeader;
+      }
+      return send(response, merchantResponse.status, text, contentType, forwardedHeaders);
     }
 
-    if (request.method === "POST" && url.pathname === "/api/facilitator/quotes") {
+    if (request.method === "POST" && url.pathname === "/api/facilitator/prepare") {
       const body = await readJsonBody(request);
       const result = await forwardJson({
         method: "POST",
-        url: `${FACILITATOR_URL}/quotes`,
+        url: `${FACILITATOR_URL}/v2/x402/prepare`,
         body,
         headers: {
           "content-type": "application/json"
         }
-      });
-      return send(response, result.status, JSON.stringify(result.payload, null, 2), JSON_CONTENT_TYPE);
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/facilitator/submit") {
-      const body = await readJsonBody(request);
-      const result = await forwardJson({
-        method: "POST",
-        url: `${FACILITATOR_URL}/submit`,
-        body,
-        headers: {
-          "content-type": "application/json"
-        }
-      });
-      return send(response, result.status, JSON.stringify(result.payload, null, 2), JSON_CONTENT_TYPE);
-    }
-
-    if (request.method === "GET" && url.pathname.startsWith("/api/facilitator/payments/")) {
-      const paymentId = decodeURIComponent(url.pathname.slice("/api/facilitator/payments/".length));
-      const result = await forwardJson({
-        method: "GET",
-        url: `${FACILITATOR_URL}/payments/${encodeURIComponent(paymentId)}`
       });
       return send(response, result.status, JSON.stringify(result.payload, null, 2), JSON_CONTENT_TYPE);
     }

@@ -10,7 +10,8 @@ function sendJson(response, statusCode, payload) {
     "content-type": JSON_CONTENT_TYPE,
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type,x-payment-receipt"
+    "access-control-allow-headers": "content-type,payment-signature,payment-required,payment-response",
+    "access-control-expose-headers": "payment-signature,payment-required,payment-response"
   });
   response.end(JSON.stringify(payload, null, 2));
 }
@@ -40,7 +41,8 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(204, {
         "access-control-allow-origin": "*",
         "access-control-allow-methods": "GET,POST,OPTIONS",
-        "access-control-allow-headers": "content-type,x-payment-receipt"
+        "access-control-allow-headers": "content-type,payment-signature,payment-required,payment-response",
+        "access-control-expose-headers": "payment-signature,payment-required,payment-response"
       });
       response.end();
       return;
@@ -50,16 +52,26 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 200, service.getHealth());
     }
 
-    if (request.method === "POST" && url.pathname === "/quotes") {
+    if (request.method === "GET" && url.pathname === "/v2/x402/supported") {
+      return sendJson(response, 200, service.getSupported());
+    }
+
+    if (request.method === "POST" && url.pathname === "/v2/x402/prepare") {
       const body = await readJsonBody(request);
-      const quote = await service.createQuote(body);
+      const quote = await service.createPreparation(body);
       return sendJson(response, 200, quote);
     }
 
-    if (request.method === "POST" && url.pathname === "/submit") {
+    if (request.method === "POST" && url.pathname === "/v2/x402/verify") {
       const body = await readJsonBody(request);
-      const receipt = await service.submitQuote(body);
-      return sendJson(response, 200, receipt);
+      const verification = await service.verifyPayment(body);
+      return sendJson(response, 200, verification);
+    }
+
+    if (request.method === "POST" && url.pathname === "/v2/x402/settle") {
+      const body = await readJsonBody(request);
+      const settlement = await service.settlePayment(body);
+      return sendJson(response, 200, settlement);
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/payments/")) {

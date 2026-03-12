@@ -1,97 +1,89 @@
-# x402 POC
+# x402 Kaspa POC
 
-This repo is a local x402 payment flow on Kaspa.
+This repo is a local Kaspa implementation of the x402 V2 HTTP transport.
 
-It runs three entities:
+The public payment contract is now standard x402:
 
-- `Merchant`: paywalls `GET /premium` and returns an x402 payment requirement.
-- `Facilitator`: turns that requirement into an unsigned Kaspa transaction, accepts the signed transaction back, broadcasts it, and records a receipt.
-- `Client`: the browser UI. It receives the payment requirement, checks the unsigned transaction before signing, signs with the Kaspa WASM SDK, and retries the merchant request with the receipt.
+- merchant returns `402 Payment Required` with a `PAYMENT-REQUIRED` header
+- client retries the same request with `PAYMENT-SIGNATURE`
+- merchant calls facilitator `/v2/x402/verify` and `/v2/x402/settle`
+- merchant returns the protected resource plus `PAYMENT-RESPONSE`
 
-The important trust boundary is this: the facilitator prepares and broadcasts, but the client does not sign blindly. Before signing, the client reads the unsigned PSKB and checks that it sends the required amount to the merchant address, that the change output matches what the facilitator claimed, and that the fee stays within the allowed limit.
+Kaspa-specific transaction preparation still exists, but it sits behind the standard transport as a scheme helper. The client asks the facilitator for an unsigned PSKB at `/v2/x402/prepare`, inspects the transaction locally, signs locally, and only then sends the standard `PaymentPayload` back to the merchant.
 
-## Entity Map
+## Flow
 
 ```text
-Client UI            Merchant               Facilitator             Kaspa TN12
-    |                    |                        |                       |
-    | GET /premium       |                        |                       |
-    |------------------->|                        |                       |
-    |                    | 402 + pay request      |                       |
-    |<-------------------|                        |                       |
-    |                    |                        |                       |
-    | ask facilitator to build the unsigned tx    |                       |
-    |-------------------------------------------->|                       |
-    |                    |                        | unsigned PSKB +       |
-    |<--------------------------------------------| expected outputs/fee  |
-    |                    |                        |                       |
-    | check merchant output, change, and fee      |                       |
-    | sign transaction locally                    |                       |
-    | send signed tx                              |                       |
-    |-------------------------------------------->|                       |
-    |                    |                        |---------------------->|
-    |                    |                        |                       |
-    |                    |                        | receipt after         |
-    |<--------------------------------------------| successful broadcast  |
-    |                    |                        |                       |
-    | retry /premium with receipt                 |                       |
-    |------------------->|                        |                       |
-    |                    | validate receipt ----->|                       |
-    |                    |<-----------------------|                       |
-    | 200 unlocked       |                        |                       |
-    |<-------------------|                        |                       |
+Client UI            Merchant                    Facilitator               Kaspa TN12
+    |                    |                             |                        |
+    | GET /premium       |                             |                        |
+    |------------------->|                             |                        |
+    |                    | 402 + PAYMENT-REQUIRED      |                        |
+    |<-------------------|                             |                        |
+    |                    |                             |                        |
+    | POST /v2/x402/prepare                            |                        |
+    |------------------------------------------------->|                        |
+    |                    |                             | unsigned PSKB          |
+    |<-------------------------------------------------| + signing summary      |
+    |                    |                             |                        |
+    | inspect PSKB locally and sign                    |                        |
+    |                    |                             |                        |
+    | retry GET /premium with PAYMENT-SIGNATURE        |                        |
+    |------------------->|                             |                        |
+    |                    | POST /v2/x402/verify        |                        |
+    |                    |---------------------------->|                        |
+    |                    | POST /v2/x402/settle        |                        |
+    |                    |---------------------------->| broadcast + verify     |
+    |                    |<----------------------------| PAYMENT-RESPONSE data  |
+    | 200 + PAYMENT-RESPONSE                           |                        |
+    |<-------------------|                             |                        |
 ```
 
-## Entities
+## Components
 
 ### Merchant
 
-- Serves the protected resource at `http://127.0.0.1:4022/premium`.
-- Returns `402 Payment Required` with an x402 requirement when the request is unpaid.
-- Verifies the facilitator receipt before unlocking the resource.
-- Implemented in `apps/merchant-demo/src/index.js`.
+- serves `http://127.0.0.1:4022/premium`
+- emits `PAYMENT-REQUIRED`
+- accepts `PAYMENT-SIGNATURE`
+- delegates verify and settle to the facilitator
 
 ### Facilitator
 
-- Serves `http://127.0.0.1:4021`.
-- Accepts a payment requirement and payer addresses at `POST /quotes`.
-- Fetches live TN12 UTXOs, builds an unsigned `kaspa-unsigned-transaction-v1` PSKB, and returns the transaction plus the fields the client should see in it.
-- Accepts the signed transaction at `POST /submit`.
-- Broadcasts to TN12, verifies the merchant output, persists the receipt, and exposes it at `GET /payments/:paymentId`.
-- Implemented in `apps/facilitator/src/main.rs`.
+- serves `http://127.0.0.1:4021`
+- standard endpoints:
+  - `GET /v2/x402/supported`
+  - `POST /v2/x402/verify`
+  - `POST /v2/x402/settle`
+- Kaspa helper endpoint:
+  - `POST /v2/x402/prepare`
+- builds unsigned PSKBs, validates signed payloads, broadcasts to TN12, and persists settled payments
 
 ### Client
 
-- Requests the protected resource.
-- Receives the x402 payment requirement.
-- Requests a quote from the facilitator.
-- Reads the unsigned PSKB locally and checks the actual transaction before signing.
-- Confirms that the transaction pays the merchant address, pays the required amount, uses the expected change output, and stays within the fee limit.
-- Signs the PSKB locally with the Kaspa WASM SDK.
-- Submits the signed transaction and retries the merchant request with the receipt.
-- Browser flow and payment sequence: `apps/web-ui/public/app.js`
-- Browser-side PSKB read/check/sign logic: `apps/web-ui/public/kaspa-wallet.js`
+- requests the protected resource
+- decodes the x402 challenge from `PAYMENT-REQUIRED`
+- asks the facilitator to prepare the unsigned PSKB
+- verifies the real outputs, change output, and fee before signing
+- signs locally with the Kaspa WASM SDK
+- retries the same merchant request with a standard `PaymentPayload`
 
-## How The Flow Works
+## Kaspa Exact Mapping
 
-1. The client requests `GET /premium` from the merchant.
-2. The merchant returns `402` plus the x402 requirement: merchant address, amount, expiry, and facilitator URL.
-3. The client sends that requirement plus payer address context to the facilitator `POST /quotes`.
-4. The facilitator fetches live payer UTXOs on TN12 and returns:
-   - `txFormat: "kaspa-unsigned-transaction-v1"`
-   - `unsignedTransaction` as a PSKB payload
-   - transaction details the client must match against the PSKB before signing
-5. The client checks that the facilitator did not change the merchant address, the amount, the change output, or the fee.
-6. The client deserializes the unsigned PSKB locally and checks the actual outputs in the transaction itself.
-7. The client signs locally with the vendored Kaspa WASM SDK.
-8. The client posts `{ quoteId, signedTransaction }` to `POST /submit`.
-9. The facilitator broadcasts the signed transaction, verifies the merchant output, stores a receipt, and returns it.
-10. The client retries the merchant request with `x-payment-receipt`.
-11. The merchant checks the facilitator record and unlocks the resource.
+The repo maps Kaspa onto the standard `exact` scheme.
+
+- `scheme`: `exact`
+- `network`: `kaspa:testnet-12`
+- `asset`: `kaspa:testnet-12/slip44:111111`
+- `payTo`: merchant Kaspa address
+- `amount`: sompi as a string
+- `maxTimeoutSeconds`: x402 timeout window
+- `extra.maxFeeSompi`: fee ceiling the client enforces before signing
+- `extra.txFormat`: `kaspa-unsigned-transaction-v1`
+
+The `payment-identifier` extension is used to carry the client-generated payment id through the payment payload and settlement response.
 
 ## Run It
-
-From `x402-kaspa-poc`:
 
 ```bash
 npm install
@@ -100,13 +92,11 @@ npm run dev
 
 This starts:
 
-- Facilitator on `http://127.0.0.1:4021`
-- Merchant on `http://127.0.0.1:4022`
+- facilitator on `http://127.0.0.1:4021`
+- merchant on `http://127.0.0.1:4022`
 - UI on `http://127.0.0.1:4023`
 
 Then open `http://127.0.0.1:4023`.
-
-The UI `Pay` flow does the full path end to end: quote, check the transaction, sign locally, submit, receive receipt, retry merchant.
 
 If you want to run services separately:
 
@@ -118,9 +108,9 @@ npm run ui
 
 ## Default Wallets
 
-The repo ships with hardcoded, funded testnet wallets for the payer and merchant so the flow works out of the box on TN12.
+The repo ships with hardcoded TN12 payer and merchant wallets so the flow works out of the box when those wallets have spendable funds.
 
-Those defaults are overrideable with environment variables:
+Overrideable environment variables:
 
 - `X402_PAYER_MNEMONIC`
 - `X402_MERCHANT_MNEMONIC`
@@ -132,17 +122,15 @@ The browser UI exposes the payer mnemonic only through a local endpoint so brows
 
 - Node.js `>=25`
 - Rust toolchain
-- Local Kaspa WASM SDK at `.local/kaspa-wasm32-sdk` by default
+- local Kaspa WASM SDK at `.local/kaspa-wasm32-sdk` by default
 
-To override the SDK path:
+Override the SDK path with:
 
 ```bash
 export X402_KASPA_WASM_SDK_ROOT="/path/to/kaspa-wasm32-sdk"
 ```
 
 ## Environment
-
-Useful overrides:
 
 - `X402_KASPA_WASM_SDK_ROOT`
 - `X402_KASPA_WASM_SDK_FLAVOR`
@@ -157,20 +145,21 @@ Useful overrides:
 Defaults worth knowing:
 
 - TN12 wRPC endpoint: `wss://tn12reset-wrpc.kasia.fyi`
-- Facilitator state file: `apps/facilitator/.data/facilitator-state.json`
-- WASM flavor: `kaspa-dev` by default, because the plain `kaspa` bundle here does not support `testnet-12`
+- facilitator state file: `apps/facilitator/.data/facilitator-state.json`
+- WASM flavor: `kaspa-dev`
 
 ## Verification
 
 ```bash
 npm test
+cargo check --manifest-path apps/facilitator/Cargo.toml
 npm run proof:e2e
 ```
 
 The end-to-end proof requires the active payer wallet to have spendable TN12 funds. When it does, the proof checks that:
 
-- the merchant first returns `402`
-- the facilitator returns an unsigned x402 Kaspa quote
+- the merchant first returns `402` with `PAYMENT-REQUIRED`
+- the facilitator returns an unsigned Kaspa PSKB from `/v2/x402/prepare`
 - the client checks the transaction and signs locally
-- the facilitator returns a real txid
-- the merchant unlocks on retry
+- the merchant settles through `/v2/x402/settle`
+- the merchant unlocks with `PAYMENT-RESPONSE`
